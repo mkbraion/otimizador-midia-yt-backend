@@ -1,4 +1,5 @@
-# Faz o Railway (Nixpacks) instalar o ffmpeg — necessário pro yt-dlp
-# juntar vídeo+áudio em HD (1080p/720p) e extrair áudio.
+# Faz o Railway (Nixpacks) instalar:
+# - ffmpeg: pro yt-dlp juntar vídeo+áudio em HD (1080p/720p) e extrair áudio.
+# - python3: o yt-dlp (baixado pelo youtube-dl-exec no Linux) roda em cima do python3.
 [phases.setup]
-aptPkgs = ["ffmpeg"]
+aptPkgs = ["ffmpeg", "python3"]
