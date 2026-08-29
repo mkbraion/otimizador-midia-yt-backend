@@ -28,6 +28,25 @@ function safeName(s) {
   return (s || "video").replace(/[^\w\-. ]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
 
+// Cookies opcionais (pra driblar o "confirme que não é um robô" em IP de nuvem).
+// Defina a env YTDLP_COOKIES_B64 = base64 de um cookies.txt exportado do navegador logado.
+const COOKIE_PATH = (() => {
+  const b64 = process.env.YTDLP_COOKIES_B64;
+  if (!b64) return null;
+  try { const p = path.join(os.tmpdir(), "yt-cookies.txt"); fs.writeFileSync(p, Buffer.from(b64, "base64")); return p; }
+  catch { return null; }
+})();
+
+// Opções comuns: tenta clientes que às vezes passam sem login + cookies se houver.
+function commonOpts() {
+  const o = {
+    noWarnings: true, noCheckCertificates: true, noPlaylist: true,
+    extractorArgs: "youtube:player_client=default,android,web_safari,tv",
+  };
+  if (COOKIE_PATH) o.cookies = COOKIE_PATH;
+  return o;
+}
+
 app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt" }));
 
 // ---- metadados + alturas (resoluções) disponíveis ----
@@ -36,8 +55,7 @@ app.get("/info", async (req, res) => {
   if (!isYouTube(url)) return res.status(400).json({ error: "URL do YouTube inválida." });
   try {
     const info = await youtubedl(url, {
-      dumpSingleJson: true, noWarnings: true, noCheckCertificates: true,
-      noPlaylist: true, preferFreeFormats: true,
+      dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(),
     });
     const heights = [...new Set((info.formats || [])
       .filter(f => f.vcodec && f.vcodec !== "none" && f.height)
@@ -70,10 +88,7 @@ app.get("/download", async (req, res) => {
   const outTpl = path.join(tmp, "media.%(ext)s");
   const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
 
-  const opts = {
-    output: outTpl, format: fmt, noPlaylist: true,
-    noWarnings: true, noCheckCertificates: true, noPart: true,
-  };
+  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts() };
   if (!audio) opts.mergeOutputFormat = "mp4";
 
   try {
