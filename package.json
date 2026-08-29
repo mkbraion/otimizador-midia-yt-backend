@@ -1,0 +1,18 @@
+{
+  "name": "oficina-midia-yt-backend",
+  "version": "1.0.0",
+  "description": "Backend de download do YouTube (yt-dlp) para a Oficina de Mídia",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "youtube-dl-exec": "^3.0.10"
+  }
+}
