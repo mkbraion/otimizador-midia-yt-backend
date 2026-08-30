@@ -89,37 +89,74 @@ const fnum = q => { const m = String(q || "").match(/(\d{3,4})/); return m ? par
 const pickThumb = j => { const t = j.thumbnails || j.thumbnail; if (Array.isArray(t) && t.length) return t[t.length - 1].url || t[t.length - 1]; return j.thumbnail || null; };
 const apiVideos = j => (j.videos && j.videos.items) || j.videos || j.formats || [];
 const apiAudios = j => (j.audios && j.audios.items) || j.audios || [];
+const { spawn } = require("child_process");
+const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
+const vh = v => fnum(v.quality || v.qualityLabel || v.height);
+// só formatos mp4/avc dão pra juntar por cópia (sem re-encodar) — é o que entregamos.
+function videoPool(j) {
+  const vids = apiVideos(j).filter(v => v && v.url);
+  const mp4s = vids.filter(v => (v.extension || "").toLowerCase() === "mp4");
+  return (mp4s.length ? mp4s : vids).slice().sort((a, b) => vh(b) - vh(a));
+}
 function infoFromApi(j) {
-  const dur = j.lengthSeconds || j.duration || 0;
-  let vids = apiVideos(j).filter(v => v && v.url && v.hasAudio !== false);
-  if (!vids.length) vids = apiVideos(j).filter(v => v && v.url);
-  const heights = [...new Set(vids.map(v => fnum(v.quality || v.qualityLabel || v.height)).filter(Boolean))].sort((a, b) => b - a);
-  return { title: j.title, duration: dur, thumbnail: pickThumb(j),
-    uploader: (j.channel && j.channel.name) || j.author || j.uploader, maxHeight: heights[0] || null, heights };
+  const heights = [...new Set(videoPool(j).map(vh).filter(Boolean))].sort((a, b) => b - a);
+  return {
+    title: j.title, duration: j.lengthSeconds || j.duration || 0, thumbnail: pickThumb(j),
+    uploader: (j.channel && j.channel.name) || j.author || j.uploader,
+    maxHeight: heights[0] || null, heights,
+  };
+}
+function streamUrl(res, url, filename, ctype) {
+  return fetch(url).then(up => {
+    if (!up.ok || !up.body) { if (!res.headersSent) res.status(502).send("Falha ao obter o arquivo."); return; }
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", ctype);
+    const len = up.headers.get("content-length"); if (len) res.setHeader("Content-Length", len);
+    Readable.fromWeb(up.body).pipe(res);
+  });
+}
+async function fetchToFile(url, file) {
+  const r = await fetch(url);
+  if (!r.ok || !r.body) throw new Error("fetch " + r.status);
+  await new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(file);
+    Readable.fromWeb(r.body).pipe(ws); ws.on("finish", resolve); ws.on("error", reject);
+  });
 }
 async function apiDownload(res, url, audio, H, title) {
   const id = videoId(url); if (!id) return res.status(400).send("Link inválido.");
   const j = await apiDetails(id);
   const dur = j.lengthSeconds || j.duration || 0;
   if (dur && dur > MAX_DURATION) return res.status(413).send(`Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).`);
-  let target, ext;
+
   if (audio) {
-    const a = apiAudios(j); if (!a.length) return res.status(500).send("Sem faixa de áudio disponível.");
-    target = a[0].url; ext = "." + (a[0].extension || "m4a");
-  } else {
-    let vids = apiVideos(j).filter(v => v && v.url && v.hasAudio !== false);
-    if (!vids.length) vids = apiVideos(j).filter(v => v && v.url);
-    vids.sort((x, y) => fnum(y.quality || y.qualityLabel || y.height) - fnum(x.quality || x.qualityLabel || x.height));
-    const pick = H ? (vids.find(v => fnum(v.quality || v.qualityLabel || v.height) <= H) || vids[vids.length - 1]) : vids[0];
-    if (!pick) return res.status(500).send("Nenhum formato disponível.");
-    target = pick.url; ext = "." + (pick.extension || "mp4");
+    const a = apiAudios(j); const aud = a.find(x => (x.extension || "") === "m4a") || a[0];
+    if (!aud || !aud.url) return res.status(500).send("Sem faixa de áudio disponível.");
+    return streamUrl(res, aud.url, safeName(title) + ".m4a", "audio/mp4");
   }
-  const up = await fetch(target);
-  if (!up.ok || !up.body) return res.status(502).send("Falha ao obter o arquivo da API.");
-  res.setHeader("Content-Disposition", `attachment; filename="${safeName(title) + ext}"`);
-  res.setHeader("Content-Type", audio ? "audio/mp4" : "video/mp4");
-  const len = up.headers.get("content-length"); if (len) res.setHeader("Content-Length", len);
-  Readable.fromWeb(up.body).pipe(res);
+
+  const pool = videoPool(j);
+  const chosen = H ? (pool.find(v => vh(v) <= H) || pool[pool.length - 1]) : pool[0];
+  if (!chosen) return res.status(500).send("Nenhum formato disponível.");
+  // 360p já vem com áudio → manda direto
+  if (chosen.hasAudio) return streamUrl(res, chosen.url, safeName(title) + ".mp4", "video/mp4");
+
+  // resoluções altas: junta vídeo + áudio com ffmpeg
+  const a = apiAudios(j); const aud = a.find(x => (x.extension || "") === "m4a") || a[0];
+  if (!aud || !aud.url) return streamUrl(res, chosen.url, safeName(title) + ".mp4", "video/mp4");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ofm-"));
+  const vf = path.join(tmp, "v.mp4"), af = path.join(tmp, "a.m4a"), of = path.join(tmp, "out.mp4");
+  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
+  try {
+    await Promise.all([fetchToFile(chosen.url, vf), fetchToFile(aud.url, af)]);
+    await new Promise((resolve, reject) => {
+      const p = spawn(FFMPEG, ["-y", "-i", vf, "-i", af, "-c", "copy", "-movflags", "+faststart", of]);
+      let err = ""; p.stderr.on("data", d => err += d);
+      p.on("error", reject);
+      p.on("close", c => c === 0 ? resolve() : reject(new Error("ffmpeg " + c + " " + err.slice(-160))));
+    });
+    res.download(of, safeName(title) + ".mp4", () => cleanup());
+  } catch (e) { cleanup(); if (!res.headersSent) res.status(500).send("Falha ao juntar vídeo/áudio: " + (e.message || e)); }
 }
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null }));
