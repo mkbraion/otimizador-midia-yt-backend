@@ -38,6 +38,19 @@ melhor qualidade "progressiva" (arquivo único, normalmente 360p).
 2. O ambiente Node do Render **não traz ffmpeg** — para HD, use um Dockerfile com ffmpeg
    (ou aceite o fallback 360p). Railway é mais simples para este caso.
 
+## Modo API (estável, contorna o bloqueio do YouTube)
+Rodar yt-dlp de um IP de nuvem leva bloqueio ("Sign in to confirm you're not a bot").
+Pra ficar estável como os sites grandes, use uma API de extração:
+
+1. No [RapidAPI](https://rapidapi.com), assine **youtube-media-downloader** (tem plano free com cota).
+2. No Railway → seu serviço → **Variables**, adicione:
+   - `RAPIDAPI_KEY` = sua chave do RapidAPI
+   - `RAPIDAPI_HOST` = `youtube-media-downloader.p.rapidapi.com` (opcional; é o padrão)
+3. Redeploy. Confira em `/health` que aparece `"api": true`.
+
+Com a API ligada, `/info` e `/download` usam ela; sem chave, caem no yt-dlp.
+`/raw?url=...` mostra a resposta crua da API (útil pra depurar).
+
 ## Observações
 - Só aceita links do YouTube (validação de domínio no servidor).
 - Uso pessoal. Respeite os direitos autorais e os Termos do YouTube — baixe conteúdo seu,

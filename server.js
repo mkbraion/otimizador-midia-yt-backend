@@ -61,12 +61,88 @@ function commonOpts() {
   return o;
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt" }));
+// ---- API de extração (RapidAPI) — quando configurada, contorna o bloqueio do YouTube ----
+// Assine "youtube-media-downloader" no RapidAPI e defina no servidor:
+//   RAPIDAPI_KEY   = sua chave
+//   RAPIDAPI_HOST  = youtube-media-downloader.p.rapidapi.com  (padrão)
+const RAPID_KEY = process.env.RAPIDAPI_KEY || "";
+const RAPID_HOST = process.env.RAPIDAPI_HOST || "youtube-media-downloader.p.rapidapi.com";
+const USE_API = !!RAPID_KEY;
+const { Readable } = require("stream");
+
+function videoId(u) {
+  try {
+    const url = new URL(u);
+    if (url.hostname.includes("youtu.be")) return url.pathname.slice(1).split("/")[0];
+    if (url.searchParams.get("v")) return url.searchParams.get("v");
+    const m = url.pathname.match(/\/(shorts|embed)\/([^/?#]+)/); if (m) return m[2];
+  } catch {}
+  return null;
+}
+async function apiDetails(id) {
+  const r = await fetch(`https://${RAPID_HOST}/v2/video/details?videoId=${encodeURIComponent(id)}`,
+    { headers: { "X-RapidAPI-Key": RAPID_KEY, "X-RapidAPI-Host": RAPID_HOST } });
+  if (!r.ok) throw new Error("API respondeu " + r.status);
+  return r.json();
+}
+const fnum = q => { const m = String(q || "").match(/(\d{3,4})/); return m ? parseInt(m[1]) : 0; };
+const pickThumb = j => { const t = j.thumbnails || j.thumbnail; if (Array.isArray(t) && t.length) return t[t.length - 1].url || t[t.length - 1]; return j.thumbnail || null; };
+const apiVideos = j => (j.videos && j.videos.items) || j.videos || j.formats || [];
+const apiAudios = j => (j.audios && j.audios.items) || j.audios || [];
+function infoFromApi(j) {
+  const dur = j.lengthSeconds || j.duration || 0;
+  let vids = apiVideos(j).filter(v => v && v.url && v.hasAudio !== false);
+  if (!vids.length) vids = apiVideos(j).filter(v => v && v.url);
+  const heights = [...new Set(vids.map(v => fnum(v.quality || v.qualityLabel || v.height)).filter(Boolean))].sort((a, b) => b - a);
+  return { title: j.title, duration: dur, thumbnail: pickThumb(j),
+    uploader: (j.channel && j.channel.name) || j.author || j.uploader, maxHeight: heights[0] || null, heights };
+}
+async function apiDownload(res, url, audio, H, title) {
+  const id = videoId(url); if (!id) return res.status(400).send("Link inválido.");
+  const j = await apiDetails(id);
+  const dur = j.lengthSeconds || j.duration || 0;
+  if (dur && dur > MAX_DURATION) return res.status(413).send(`Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).`);
+  let target, ext;
+  if (audio) {
+    const a = apiAudios(j); if (!a.length) return res.status(500).send("Sem faixa de áudio disponível.");
+    target = a[0].url; ext = "." + (a[0].extension || "m4a");
+  } else {
+    let vids = apiVideos(j).filter(v => v && v.url && v.hasAudio !== false);
+    if (!vids.length) vids = apiVideos(j).filter(v => v && v.url);
+    vids.sort((x, y) => fnum(y.quality || y.qualityLabel || y.height) - fnum(x.quality || x.qualityLabel || x.height));
+    const pick = H ? (vids.find(v => fnum(v.quality || v.qualityLabel || v.height) <= H) || vids[vids.length - 1]) : vids[0];
+    if (!pick) return res.status(500).send("Nenhum formato disponível.");
+    target = pick.url; ext = "." + (pick.extension || "mp4");
+  }
+  const up = await fetch(target);
+  if (!up.ok || !up.body) return res.status(502).send("Falha ao obter o arquivo da API.");
+  res.setHeader("Content-Disposition", `attachment; filename="${safeName(title) + ext}"`);
+  res.setHeader("Content-Type", audio ? "audio/mp4" : "video/mp4");
+  const len = up.headers.get("content-length"); if (len) res.setHeader("Content-Length", len);
+  Readable.fromWeb(up.body).pipe(res);
+}
+
+app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null }));
+
+// debug: inspeciona a resposta crua da API (só quando a API está configurada)
+app.get("/raw", infoLimiter, async (req, res) => {
+  if (!USE_API) return res.status(404).json({ error: "API não configurada" });
+  try { res.json(await apiDetails(videoId(req.query.url))); }
+  catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
 
 // ---- metadados + alturas (resoluções) disponíveis ----
 app.get("/info", infoLimiter, async (req, res) => {
   const url = req.query.url;
   if (!isYouTube(url)) return res.status(400).json({ error: "URL do YouTube inválida." });
+  if (USE_API) {
+    try {
+      const info = infoFromApi(await apiDetails(videoId(url)));
+      if (info.duration && info.duration > MAX_DURATION)
+        return res.status(413).json({ error: `Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).` });
+      return res.json(info);
+    } catch (e) { /* se a API falhar, tenta o yt-dlp abaixo */ }
+  }
   try {
     const info = await youtubedl(url, {
       dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(),
@@ -95,6 +171,11 @@ app.get("/download", dlLimiter, async (req, res) => {
   if (!isYouTube(url)) return res.status(400).send("URL do YouTube inválida.");
   const audio = req.query.audio === "1";
   const H = parseInt(req.query.height) || 0;
+
+  if (USE_API) {
+    try { await apiDownload(res, url, audio, H, req.query.title); return; }
+    catch (e) { if (res.headersSent) return; /* senão, tenta o yt-dlp abaixo */ }
+  }
 
   // bloqueia vídeos longos demais (metadados rápidos, sem baixar)
   try {
