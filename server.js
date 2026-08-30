@@ -92,11 +92,13 @@ const apiAudios = j => (j.audios && j.audios.items) || j.audios || [];
 const { spawn } = require("child_process");
 const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const vh = v => fnum(v.quality || v.qualityLabel || v.height);
-// só formatos mp4/avc dão pra juntar por cópia (sem re-encodar) — é o que entregamos.
+// só H.264/avc (mp4) dá pra juntar por cópia e tocar em qualquer lugar — é o que entregamos.
 function videoPool(j) {
   const vids = apiVideos(j).filter(v => v && v.url);
-  const mp4s = vids.filter(v => (v.extension || "").toLowerCase() === "mp4");
-  return (mp4s.length ? mp4s : vids).slice().sort((a, b) => vh(b) - vh(a));
+  const avc = vids.filter(v => /avc1|h264/i.test(v.mimeType || ""));
+  const mp4 = vids.filter(v => (v.extension || "").toLowerCase() === "mp4");
+  const pool = avc.length ? avc : (mp4.length ? mp4 : vids);
+  return pool.slice().sort((a, b) => vh(b) - vh(a));
 }
 function infoFromApi(j) {
   const heights = [...new Set(videoPool(j).map(vh).filter(Boolean))].sort((a, b) => b - a);
