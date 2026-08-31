@@ -8,6 +8,7 @@
 
 const express = require("express");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
@@ -16,7 +17,17 @@ const youtubedl = require("youtube-dl-exec");
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// limite de duração (segundos) — bloqueia filmes/lives enormes. Ajustável por env.
+const MAX_DURATION = parseInt(process.env.MAX_DURATION) || 2700; // 45 min
+
+app.set("trust proxy", 1); // atrás do proxy do Railway (IP real vem no X-Forwarded-For)
 app.use(cors());
+
+// proteção contra abuso: limite de requisições por IP
+const infoLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Muitas buscas seguidas. Espere um minuto e tente de novo." } });
+const dlLimiter = rateLimit({ windowMs: 60 * 1000, max: 8, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Muitos downloads seguidos. Espere um minuto e tente de novo." } });
 
 function isYouTube(u) {
   try {
@@ -50,13 +61,15 @@ function commonOpts() {
 app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt" }));
 
 // ---- metadados + alturas (resoluções) disponíveis ----
-app.get("/info", async (req, res) => {
+app.get("/info", infoLimiter, async (req, res) => {
   const url = req.query.url;
   if (!isYouTube(url)) return res.status(400).json({ error: "URL do YouTube inválida." });
   try {
     const info = await youtubedl(url, {
       dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(),
     });
+    if (info.duration && info.duration > MAX_DURATION)
+      return res.status(413).json({ error: `Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).` });
     const heights = [...new Set((info.formats || [])
       .filter(f => f.vcodec && f.vcodec !== "none" && f.height)
       .map(f => f.height))].sort((a, b) => b - a);
@@ -74,11 +87,18 @@ app.get("/info", async (req, res) => {
 });
 
 // ---- download: baixa (e junta, se houver ffmpeg) num temp e envia ----
-app.get("/download", async (req, res) => {
+app.get("/download", dlLimiter, async (req, res) => {
   const url = req.query.url;
   if (!isYouTube(url)) return res.status(400).send("URL do YouTube inválida.");
   const audio = req.query.audio === "1";
   const H = parseInt(req.query.height) || 0;
+
+  // bloqueia vídeos longos demais (metadados rápidos, sem baixar)
+  try {
+    const dur = parseInt(String(await youtubedl(url, { print: "%(duration)s", skipDownload: true, ...commonOpts() })).trim());
+    if (dur && dur > MAX_DURATION)
+      return res.status(413).send(`Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).`);
+  } catch (e) { /* se falhar aqui, o download abaixo devolve o erro real */ }
 
   const fmt = audio
     ? "bestaudio[ext=m4a]/bestaudio"
