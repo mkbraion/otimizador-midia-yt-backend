@@ -141,22 +141,19 @@ async function apiDownload(res, url, audio, H, title) {
   // 360p já vem com áudio → manda direto
   if (chosen.hasAudio) return streamUrl(res, chosen.url, safeName(title) + ".mp4", "video/mp4");
 
-  // resoluções altas: junta vídeo + áudio com ffmpeg
+  // resoluções altas: junta vídeo + áudio com ffmpeg, TRANSMITINDO em tempo real
+  // (mp4 fragmentado por pipe) — evita o timeout do proxy em vídeos grandes.
   const a = apiAudios(j); const aud = a.find(x => (x.extension || "") === "m4a") || a[0];
   if (!aud || !aud.url) return streamUrl(res, chosen.url, safeName(title) + ".mp4", "video/mp4");
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ofm-"));
-  const vf = path.join(tmp, "v.mp4"), af = path.join(tmp, "a.m4a"), of = path.join(tmp, "out.mp4");
-  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
-  try {
-    await Promise.all([fetchToFile(chosen.url, vf), fetchToFile(aud.url, af)]);
-    await new Promise((resolve, reject) => {
-      const p = spawn(FFMPEG, ["-y", "-i", vf, "-i", af, "-c", "copy", "-movflags", "+faststart", of]);
-      let err = ""; p.stderr.on("data", d => err += d);
-      p.on("error", reject);
-      p.on("close", c => c === 0 ? resolve() : reject(new Error("ffmpeg " + c + " " + err.slice(-160))));
-    });
-    res.download(of, safeName(title) + ".mp4", () => cleanup());
-  } catch (e) { cleanup(); if (!res.headersSent) res.status(500).send("Falha ao juntar vídeo/áudio: " + (e.message || e)); }
+  res.setHeader("Content-Disposition", `attachment; filename="${safeName(title)}.mp4"`);
+  res.setHeader("Content-Type", "video/mp4");
+  const p = spawn(FFMPEG, ["-hide_banner", "-loglevel", "error",
+    "-i", chosen.url, "-i", aud.url, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"]);
+  p.stdout.pipe(res);
+  p.stderr.on("data", () => {});
+  p.on("error", () => { if (!res.headersSent) res.status(500).end("Erro ao processar o vídeo."); });
+  res.on("close", () => { try { p.kill("SIGKILL"); } catch {} });
 }
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null }));
