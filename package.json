@@ -11,6 +11,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "express-rate-limit": "^8.7.0",
