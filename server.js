@@ -228,7 +228,7 @@ app.get("/playlist", infoLimiter, async (req, res) => {
   if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado." });
   try {
     const info = await youtubedl(url, {
-      ...commonOpts(url), dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, noPlaylist: false,
+      ...commonOpts(url), dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, yesPlaylist: true,
     });
     const raw = Array.isArray(info.entries) ? info.entries : (info.id ? [info] : []);
     const entries = raw.map(e => {
