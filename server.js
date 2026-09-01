@@ -32,12 +32,20 @@ const infoLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: t
 const dlLimiter = rateLimit({ windowMs: 60 * 1000, max: 8, standardHeaders: true, legacyHeaders: false,
   message: { error: "Muitos downloads seguidos. Espere um minuto e tente de novo." } });
 
-function isYouTube(u) {
-  try {
-    const h = new URL(u).hostname.replace(/^www\./, "");
-    return ["youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "youtube-nocookie.com"].includes(h);
-  } catch { return false; }
+function host(u) {
+  try { return new URL(u).hostname.replace(/^www\./, "").toLowerCase(); }
+  catch { return null; }
 }
+function isYouTube(u) {
+  const h = host(u);
+  return !!h && ["youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "youtube-nocookie.com"].includes(h);
+}
+// Outros sites suportados nativamente pelo yt-dlp (grátis, sem API paga).
+function isTikTok(u)    { const h = host(u); return !!h && /(^|\.)tiktok\.com$/.test(h); }
+function isPinterest(u) { const h = host(u); return !!h && (/(^|\.)pinterest\.[a-z.]+$/.test(h) || h === "pin.it"); }
+function isMedal(u)     { const h = host(u); return !!h && /(^|\.)medal\.tv$/.test(h); }
+// URL aceita pelo backend público.
+function isSupported(u) { return isYouTube(u) || isTikTok(u) || isPinterest(u) || isMedal(u); }
 function safeName(s) {
   return (s || "video").replace(/[^\w\-. ]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
@@ -170,8 +178,8 @@ app.get("/raw", infoLimiter, async (req, res) => {
 // ---- metadados + alturas (resoluções) disponíveis ----
 app.get("/info", infoLimiter, async (req, res) => {
   const url = req.query.url;
-  if (!isYouTube(url)) return res.status(400).json({ error: "URL do YouTube inválida." });
-  if (USE_API) {
+  if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado. Use YouTube, TikTok, Pinterest ou Medal." });
+  if (USE_API && isYouTube(url)) {
     try {
       const info = infoFromApi(await apiDetails(videoId(url)));
       if (info.duration && info.duration > MAX_DURATION)
@@ -204,11 +212,11 @@ app.get("/info", infoLimiter, async (req, res) => {
 // ---- download: baixa (e junta, se houver ffmpeg) num temp e envia ----
 app.get("/download", dlLimiter, async (req, res) => {
   const url = req.query.url;
-  if (!isYouTube(url)) return res.status(400).send("URL do YouTube inválida.");
+  if (!isSupported(url)) return res.status(400).send("Link não suportado. Use YouTube, TikTok, Pinterest ou Medal.");
   const audio = req.query.audio === "1";
   const H = parseInt(req.query.height) || 0;
 
-  if (USE_API) {
+  if (USE_API && isYouTube(url)) {
     try { await apiDownload(res, url, audio, H, req.query.title); return; }
     catch (e) { if (res.headersSent) return; /* senão, tenta o yt-dlp abaixo */ }
   }
