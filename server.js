@@ -27,6 +27,7 @@ const MAX_PLAYLIST = parseInt(process.env.MAX_PLAYLIST) || 40;
 
 app.set("trust proxy", 1); // atrás do proxy do Railway (IP real vem no X-Forwarded-For)
 app.use(cors());
+app.use(express.json({ limit: "512kb" })); // pra receber o cookie do IG por POST
 
 // proteção contra abuso: limite de requisições por IP
 const infoLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
@@ -68,15 +69,38 @@ const COOKIE_PATH = cookieFile(process.env.YTDLP_COOKIES_B64, "yt-cookies.txt");
 // Mantido separado pra não enviar a sua sessão do IG para os outros sites.
 const IG_COOKIE_PATH = cookieFile(process.env.YTDLP_IG_COOKIES_B64, "ig-cookies.txt");
 
+// Cookies do IG enviados pelo site (por visitante): guardados SÓ em memória,
+// keyados por um token opaco (sid). Nunca vão pra URL/log. Expiram em 2h.
+const crypto = require("crypto");
+const IG_SESSIONS = new Map(); // sid -> { file, ts }
+const IG_TTL = 2 * 60 * 60 * 1000;
+function igSweep() {
+  const now = Date.now();
+  for (const [sid, v] of IG_SESSIONS) {
+    if (now - v.ts > IG_TTL) { try { fs.rmSync(v.file, { force: true }); } catch {} IG_SESSIONS.delete(sid); }
+  }
+}
+function igFileFor(sid) {
+  if (!sid) return null;
+  const v = IG_SESSIONS.get(sid);
+  if (!v) return null;
+  if (Date.now() - v.ts > IG_TTL) { try { fs.rmSync(v.file, { force: true }); } catch {} IG_SESSIONS.delete(sid); return null; }
+  return v.file;
+}
+
 // Opções comuns: tenta clientes que às vezes passam sem login + cookies conforme o site.
-function commonOpts(url) {
+function commonOpts(url, igSid) {
   const o = {
     noWarnings: true, noCheckCertificates: true, noPlaylist: true,
     extractorArgs: "youtube:player_client=default,android,web_safari,tv",
   };
-  // Instagram usa o cookie próprio (se houver); os demais usam o cookie geral.
-  if (url && isInstagram(url) && IG_COOKIE_PATH) o.cookies = IG_COOKIE_PATH;
-  else if (COOKIE_PATH) o.cookies = COOKIE_PATH;
+  // Instagram: 1º o cookie do visitante (sid), depois o do servidor (env), senão o geral.
+  if (url && isInstagram(url)) {
+    const sess = igFileFor(igSid);
+    if (sess) o.cookies = sess;
+    else if (IG_COOKIE_PATH) o.cookies = IG_COOKIE_PATH;
+    else if (COOKIE_PATH) o.cookies = COOKIE_PATH;
+  } else if (COOKIE_PATH) o.cookies = COOKIE_PATH;
   return o;
 }
 
@@ -179,6 +203,24 @@ async function apiDownload(res, url, audio, H, title) {
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null, igCookie: !!IG_COOKIE_PATH, cookie: !!COOKIE_PATH }));
 
+// ---- registra um cookie do Instagram enviado pelo site (POST, fica só em memória) ----
+// Body: { cookie: "<conteúdo do cookies.txt>" }  →  devolve { sid }
+app.post("/ig-cookie", infoLimiter, (req, res) => {
+  igSweep();
+  const raw = (req.body && req.body.cookie ? String(req.body.cookie) : "").trim();
+  if (!raw) return res.status(400).json({ error: "Cookie vazio." });
+  if (raw.length > 300000) return res.status(413).json({ error: "Cookie grande demais." });
+  if (!/instagram/i.test(raw)) return res.status(400).json({ error: "Isso não parece um cookies.txt do Instagram (exporte estando logado no instagram.com)." });
+  if (IG_SESSIONS.size > 500) { const first = IG_SESSIONS.keys().next().value; const v = IG_SESSIONS.get(first); if (v) { try { fs.rmSync(v.file, { force: true }); } catch {} } IG_SESSIONS.delete(first); }
+  try {
+    const sid = crypto.randomBytes(9).toString("hex");
+    const file = path.join(os.tmpdir(), "ig-" + sid + ".txt");
+    fs.writeFileSync(file, raw);
+    IG_SESSIONS.set(sid, { file, ts: Date.now() });
+    res.json({ sid, ttlMinutes: Math.round(IG_TTL / 60000) });
+  } catch (e) { res.status(500).json({ error: "Não consegui salvar o cookie." }); }
+});
+
 // debug: inspeciona a resposta crua da API (só quando a API está configurada)
 app.get("/raw", infoLimiter, async (req, res) => {
   if (!USE_API) return res.status(404).json({ error: "API não configurada" });
@@ -200,7 +242,7 @@ app.get("/info", infoLimiter, async (req, res) => {
   }
   try {
     const info = await youtubedl(url, {
-      dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(url),
+      dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(url, req.query.ig),
     });
     if (info.duration && info.duration > MAX_DURATION)
       return res.status(413).json({ error: `Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).` });
@@ -228,7 +270,7 @@ app.get("/playlist", infoLimiter, async (req, res) => {
   if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado." });
   try {
     const info = await youtubedl(url, {
-      ...commonOpts(url), dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, yesPlaylist: true,
+      ...commonOpts(url, req.query.ig), dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, yesPlaylist: true,
     });
     const raw = Array.isArray(info.entries) ? info.entries : (info.id ? [info] : []);
     const entries = raw.map(e => {
@@ -266,7 +308,7 @@ app.get("/download", dlLimiter, async (req, res) => {
 
   // bloqueia vídeos longos demais (metadados rápidos, sem baixar)
   try {
-    const dur = parseInt(String(await youtubedl(url, { print: "%(duration)s", skipDownload: true, ...commonOpts(url) })).trim());
+    const dur = parseInt(String(await youtubedl(url, { print: "%(duration)s", skipDownload: true, ...commonOpts(url, req.query.ig) })).trim());
     if (dur && dur > MAX_DURATION)
       return res.status(413).send(`Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).`);
   } catch (e) { /* se falhar aqui, o download abaixo devolve o erro real */ }
@@ -279,7 +321,7 @@ app.get("/download", dlLimiter, async (req, res) => {
   const outTpl = path.join(tmp, "media.%(ext)s");
   const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
 
-  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(url) };
+  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(url, req.query.ig) };
   if (!audio) opts.mergeOutputFormat = "mp4";
 
   try {
