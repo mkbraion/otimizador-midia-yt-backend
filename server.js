@@ -54,22 +54,29 @@ function safeName(s) {
   return (s || "video").replace(/[^\w\-. ]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
 
-// Cookies opcionais (pra driblar o "confirme que não é um robô" em IP de nuvem).
-// Defina a env YTDLP_COOKIES_B64 = base64 de um cookies.txt exportado do navegador logado.
-const COOKIE_PATH = (() => {
-  const b64 = process.env.YTDLP_COOKIES_B64;
+// Cookies opcionais (pra driblar o "confirme que não é um robô" em IP de nuvem
+// e pra listar/baixar do Instagram, que exige login).
+// Grava um cookies.txt (base64) num arquivo temp e devolve o caminho.
+function cookieFile(b64, name) {
   if (!b64) return null;
-  try { const p = path.join(os.tmpdir(), "yt-cookies.txt"); fs.writeFileSync(p, Buffer.from(b64, "base64")); return p; }
+  try { const p = path.join(os.tmpdir(), name); fs.writeFileSync(p, Buffer.from(b64, "base64")); return p; }
   catch { return null; }
-})();
+}
+// Cookie geral (YouTube etc.): env YTDLP_COOKIES_B64.
+const COOKIE_PATH = cookieFile(process.env.YTDLP_COOKIES_B64, "yt-cookies.txt");
+// Cookie SÓ do Instagram (use uma conta secundária/descartável): env YTDLP_IG_COOKIES_B64.
+// Mantido separado pra não enviar a sua sessão do IG para os outros sites.
+const IG_COOKIE_PATH = cookieFile(process.env.YTDLP_IG_COOKIES_B64, "ig-cookies.txt");
 
-// Opções comuns: tenta clientes que às vezes passam sem login + cookies se houver.
-function commonOpts() {
+// Opções comuns: tenta clientes que às vezes passam sem login + cookies conforme o site.
+function commonOpts(url) {
   const o = {
     noWarnings: true, noCheckCertificates: true, noPlaylist: true,
     extractorArgs: "youtube:player_client=default,android,web_safari,tv",
   };
-  if (COOKIE_PATH) o.cookies = COOKIE_PATH;
+  // Instagram usa o cookie próprio (se houver); os demais usam o cookie geral.
+  if (url && isInstagram(url) && IG_COOKIE_PATH) o.cookies = IG_COOKIE_PATH;
+  else if (COOKIE_PATH) o.cookies = COOKIE_PATH;
   return o;
 }
 
@@ -170,7 +177,7 @@ async function apiDownload(res, url, audio, H, title) {
   res.on("close", () => { try { p.kill("SIGKILL"); } catch {} });
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null }));
+app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null, igCookie: !!IG_COOKIE_PATH, cookie: !!COOKIE_PATH }));
 
 // debug: inspeciona a resposta crua da API (só quando a API está configurada)
 app.get("/raw", infoLimiter, async (req, res) => {
@@ -193,7 +200,7 @@ app.get("/info", infoLimiter, async (req, res) => {
   }
   try {
     const info = await youtubedl(url, {
-      dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(),
+      dumpSingleJson: true, preferFreeFormats: true, ...commonOpts(url),
     });
     if (info.duration && info.duration > MAX_DURATION)
       return res.status(413).json({ error: `Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).` });
@@ -221,7 +228,7 @@ app.get("/playlist", infoLimiter, async (req, res) => {
   if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado." });
   try {
     const info = await youtubedl(url, {
-      dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, ...commonOpts(),
+      ...commonOpts(url), dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, noPlaylist: false,
     });
     const raw = Array.isArray(info.entries) ? info.entries : (info.id ? [info] : []);
     const entries = raw.map(e => {
@@ -259,7 +266,7 @@ app.get("/download", dlLimiter, async (req, res) => {
 
   // bloqueia vídeos longos demais (metadados rápidos, sem baixar)
   try {
-    const dur = parseInt(String(await youtubedl(url, { print: "%(duration)s", skipDownload: true, ...commonOpts() })).trim());
+    const dur = parseInt(String(await youtubedl(url, { print: "%(duration)s", skipDownload: true, ...commonOpts(url) })).trim());
     if (dur && dur > MAX_DURATION)
       return res.status(413).send(`Vídeo muito longo (máx. ${Math.round(MAX_DURATION / 60)} min neste servidor público).`);
   } catch (e) { /* se falhar aqui, o download abaixo devolve o erro real */ }
@@ -272,7 +279,7 @@ app.get("/download", dlLimiter, async (req, res) => {
   const outTpl = path.join(tmp, "media.%(ext)s");
   const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
 
-  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts() };
+  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(url) };
   if (!audio) opts.mergeOutputFormat = "mp4";
 
   try {
