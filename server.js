@@ -44,8 +44,10 @@ function isYouTube(u) {
 function isTikTok(u)    { const h = host(u); return !!h && /(^|\.)tiktok\.com$/.test(h); }
 function isPinterest(u) { const h = host(u); return !!h && (/(^|\.)pinterest\.[a-z.]+$/.test(h) || h === "pin.it"); }
 function isMedal(u)     { const h = host(u); return !!h && /(^|\.)medal\.tv$/.test(h); }
+function isInstagram(u) { const h = host(u); return !!h && (/(^|\.)instagram\.com$/.test(h) || h === "instagr.am"); }
+function isFacebook(u)  { const h = host(u); return !!h && (/(^|\.)facebook\.com$/.test(h) || h === "fb.watch" || h === "fb.com"); }
 // URL aceita pelo backend público.
-function isSupported(u) { return isYouTube(u) || isTikTok(u) || isPinterest(u) || isMedal(u); }
+function isSupported(u) { return isYouTube(u) || isTikTok(u) || isPinterest(u) || isMedal(u) || isInstagram(u) || isFacebook(u); }
 function safeName(s) {
   return (s || "video").replace(/[^\w\-. ]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
@@ -178,7 +180,7 @@ app.get("/raw", infoLimiter, async (req, res) => {
 // ---- metadados + alturas (resoluções) disponíveis ----
 app.get("/info", infoLimiter, async (req, res) => {
   const url = req.query.url;
-  if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado. Use YouTube, TikTok, Pinterest ou Medal." });
+  if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado. Use YouTube, TikTok, Instagram, Facebook, Pinterest ou Medal." });
   if (USE_API && isYouTube(url)) {
     try {
       const info = infoFromApi(await apiDetails(videoId(url)));
@@ -212,7 +214,7 @@ app.get("/info", infoLimiter, async (req, res) => {
 // ---- download: baixa (e junta, se houver ffmpeg) num temp e envia ----
 app.get("/download", dlLimiter, async (req, res) => {
   const url = req.query.url;
-  if (!isSupported(url)) return res.status(400).send("Link não suportado. Use YouTube, TikTok, Pinterest ou Medal.");
+  if (!isSupported(url)) return res.status(400).send("Link não suportado. Use YouTube, TikTok, Instagram, Facebook, Pinterest ou Medal.");
   const audio = req.query.audio === "1";
   const H = parseInt(req.query.height) || 0;
 
