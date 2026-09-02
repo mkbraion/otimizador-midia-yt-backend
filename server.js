@@ -12,7 +12,10 @@ const rateLimit = require("express-rate-limit");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const youtubedl = require("youtube-dl-exec");
+const ytdl = require("youtube-dl-exec");
+// usa o yt-dlp mais recente instalado no container (YTDLP_PATH); local cai no bundled.
+const youtubedl = (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH))
+  ? ytdl.create(process.env.YTDLP_PATH) : ytdl;
 
 const app = express();
 const PORT = process.env.PORT || 8080;
