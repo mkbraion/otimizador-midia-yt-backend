@@ -22,6 +22,8 @@ const PORT = process.env.PORT || 8080;
 
 // limite de duração (segundos) — bloqueia filmes/lives enormes. Ajustável por env.
 const MAX_DURATION = parseInt(process.env.MAX_DURATION) || 2700; // 45 min
+// teto de itens ao listar um perfil/playlist (protege a banda do servidor público)
+const MAX_PLAYLIST = parseInt(process.env.MAX_PLAYLIST) || 40;
 
 app.set("trust proxy", 1); // atrás do proxy do Railway (IP real vem no X-Forwarded-For)
 app.use(cors());
@@ -212,6 +214,38 @@ app.get("/info", infoLimiter, async (req, res) => {
 });
 
 // ---- download: baixa (e junta, se houver ffmpeg) num temp e envia ----
+// ---- lista os vídeos de um PERFIL/playlist (só metadados, sem baixar) ----
+// Ex.: https://www.tiktok.com/@usuario  |  https://www.instagram.com/usuario
+app.get("/playlist", infoLimiter, async (req, res) => {
+  const url = req.query.url;
+  if (!isSupported(url)) return res.status(400).json({ error: "Link não suportado." });
+  try {
+    const info = await youtubedl(url, {
+      dumpSingleJson: true, flatPlaylist: true, playlistEnd: MAX_PLAYLIST, ...commonOpts(),
+    });
+    const raw = Array.isArray(info.entries) ? info.entries : (info.id ? [info] : []);
+    const entries = raw.map(e => {
+      let u = e.webpage_url || e.url || e.original_url || "";
+      // TikTok às vezes devolve só o id → reconstrói o link do vídeo
+      if (u && !/^https?:/i.test(u) && (e.uploader_id || info.uploader_id))
+        u = `https://www.tiktok.com/@${e.uploader_id || info.uploader_id}/video/${e.id}`;
+      const th = (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length - 1].url : e.thumbnail;
+      return { url: u, title: e.title || e.description || e.id || "", thumbnail: th || null, duration: e.duration || null };
+    }).filter(e => /^https?:/i.test(e.url));
+    if (!entries.length) return res.status(404).json({ error: "Nenhum vídeo encontrado neste perfil (pode ser privado ou exigir login)." });
+    res.json({
+      title: info.title || info.uploader || info.channel || "Perfil",
+      uploader: info.uploader || info.channel || info.uploader_id || null,
+      count: entries.length,
+      truncated: raw.length >= MAX_PLAYLIST,
+      max: MAX_PLAYLIST,
+      entries,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Não consegui listar o perfil. " + (e.stderr || e.message || "") });
+  }
+});
+
 app.get("/download", dlLimiter, async (req, res) => {
   const url = req.query.url;
   if (!isSupported(url)) return res.status(400).send("Link não suportado. Use YouTube, TikTok, Instagram, Facebook, Pinterest ou Medal.");
