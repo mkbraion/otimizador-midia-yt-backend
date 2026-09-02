@@ -56,6 +56,15 @@ function safeName(s) {
   return (s || "video").replace(/[^\w\-. ]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 80) || "video";
 }
 
+// Seleção de formato: prioriza H.264 (avc1) — toca em qualquer player, inclusive no
+// Reprodutor do Windows — na MESMA resolução, sem recompressão. Só cai pra HEVC/AV1/VP9
+// se não existir versão H.264. Sem corte, sem marca d'água (padrão do yt-dlp).
+function pickFormat(audio, H) {
+  if (audio) return "bestaudio[ext=m4a]/bestaudio";
+  const hc = H ? `[height<=${H}]` : "";
+  return `bv*[vcodec^=avc1]${hc}+ba/b[vcodec^=avc1]${hc}/bv*${hc}+ba/b${hc}/b`;
+}
+
 // Cookies opcionais (pra driblar o "confirme que não é um robô" em IP de nuvem
 // e pra listar/baixar do Instagram, que exige login).
 // Grava um cookies.txt (base64) num arquivo temp e devolve o caminho.
@@ -307,8 +316,7 @@ function batchSweep() { const now = Date.now(); for (const [k, v] of BATCH) if (
 async function downloadOne(it, root) {
   const sub = fs.mkdtempSync(path.join(root, "v-"));
   const outTpl = path.join(sub, "media.%(ext)s");
-  const fmt = it.audio ? "bestaudio[ext=m4a]/bestaudio"
-    : (it.height ? `bv*[height<=${it.height}]+ba/b[height<=${it.height}]/b` : "bv*+ba/b");
+  const fmt = pickFormat(it.audio, it.height);
   const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(it.url, it.ig) };
   if (!it.audio) opts.mergeOutputFormat = "mp4";
   await youtubedl(it.url, opts);
@@ -380,7 +388,7 @@ app.get("/download", dlLimiter, async (req, res) => {
 
   const fmt = audio
     ? "bestaudio[ext=m4a]/bestaudio"
-    : (H ? `bv*[height<=${H}]+ba/b[height<=${H}]/b` : "bv*+ba/b");
+    : pickFormat(false, H);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ofm-"));
   const outTpl = path.join(tmp, "media.%(ext)s");
