@@ -12,6 +12,7 @@ const rateLimit = require("express-rate-limit");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+const archiver = require("archiver");
 const ytdl = require("youtube-dl-exec");
 // usa o yt-dlp mais recente instalado no container (YTDLP_PATH); local cai no bundled.
 const youtubedl = (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH))
@@ -293,6 +294,70 @@ app.get("/playlist", infoLimiter, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: "Não consegui listar o perfil. " + (e.stderr || e.message || "") });
   }
+});
+
+// ---- baixar VÁRIOS de uma vez num único .zip (uma requisição só, sem bater no limite) ----
+const zipLimiter = rateLimit({ windowMs: 60 * 1000, max: 4, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Muitos pacotes seguidos. Espere um minuto." } });
+const BATCH = new Map(); // token -> { items, ts }
+const BATCH_TTL = 30 * 60 * 1000;
+function batchSweep() { const now = Date.now(); for (const [k, v] of BATCH) if (now - v.ts > BATCH_TTL) BATCH.delete(k); }
+
+// baixa 1 vídeo pra um subdir temp e devolve o caminho do arquivo
+async function downloadOne(it, root) {
+  const sub = fs.mkdtempSync(path.join(root, "v-"));
+  const outTpl = path.join(sub, "media.%(ext)s");
+  const fmt = it.audio ? "bestaudio[ext=m4a]/bestaudio"
+    : (it.height ? `bv*[height<=${it.height}]+ba/b[height<=${it.height}]/b` : "bv*+ba/b");
+  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(it.url, it.ig) };
+  if (!it.audio) opts.mergeOutputFormat = "mp4";
+  await youtubedl(it.url, opts);
+  const files = fs.readdirSync(sub);
+  if (!files.length) throw new Error("vazio");
+  return path.join(sub, files[0]);
+}
+
+// registra a seleção e devolve um token
+app.post("/batch", infoLimiter, (req, res) => {
+  batchSweep();
+  const b = req.body || {};
+  let urls = Array.isArray(b.urls) ? b.urls : [];
+  const titles = Array.isArray(b.titles) ? b.titles : [];
+  const height = parseInt(b.height) || 0, audio = !!b.audio, ig = b.ig ? String(b.ig) : null;
+  const items = urls
+    .map((u, i) => ({ url: String(u || ""), title: titles[i] || ("video_" + (i + 1)), height, audio, ig }))
+    .filter(it => isSupported(it.url))
+    .slice(0, MAX_PLAYLIST);
+  if (!items.length) return res.status(400).json({ error: "Nenhum link válido." });
+  if (BATCH.size > 200) { const first = BATCH.keys().next().value; BATCH.delete(first); }
+  const token = crypto.randomBytes(9).toString("hex");
+  BATCH.set(token, { items, ts: Date.now() });
+  res.json({ token, count: items.length });
+});
+
+// gera e envia o .zip (baixa cada vídeo e vai empacotando em streaming)
+app.get("/zip", zipLimiter, async (req, res) => {
+  const job = BATCH.get(req.query.token);
+  if (!job) return res.status(404).send("Lote expirado — refaça a seleção no site.");
+  const items = job.items;
+  res.setHeader("Content-Disposition", 'attachment; filename="videos.zip"');
+  res.setHeader("Content-Type", "application/zip");
+  const archive = archiver("zip", { zlib: { level: 0 } }); // vídeos já são comprimidos → "store"
+  archive.on("error", () => { try { res.destroy(); } catch {} });
+  archive.pipe(res);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "zip-"));
+  let aborted = false;
+  res.on("close", () => { aborted = true; });
+  for (let i = 0; i < items.length; i++) {
+    if (aborted) break;
+    try {
+      const file = await downloadOne(items[i], root);
+      const ext = path.extname(file) || (items[i].audio ? ".m4a" : ".mp4");
+      archive.append(fs.createReadStream(file), { name: String(i + 1).padStart(2, "0") + "-" + safeName(items[i].title) + ext });
+    } catch (e) { /* pula o item que falhar e segue */ }
+  }
+  try { await archive.finalize(); } catch (e) {}
+  try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
 });
 
 app.get("/download", dlLimiter, async (req, res) => {
