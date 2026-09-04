@@ -62,7 +62,12 @@ function safeName(s) {
 function pickFormat(audio, H) {
   if (audio) return "bestaudio[ext=m4a]/bestaudio";
   const hc = H ? `[height<=${H}]` : "";
-  return `bv*[vcodec^=avc1]${hc}+ba/b[vcodec^=avc1]${hc}/bv*${hc}+ba/b${hc}/b`;
+  // Prioriza H.264 nas duas nomenclaturas que o yt-dlp usa: "avc1…" (YouTube/IG) e "h264" (TikTok).
+  return [
+    `bv*[vcodec^=avc1]${hc}+ba`, `b[vcodec^=avc1]${hc}`,
+    `bv*[vcodec^=h264]${hc}+ba`, `b[vcodec^=h264]${hc}`,
+    `bv*${hc}+ba`, `b${hc}`, `b`,
+  ].join("/");
 }
 
 // Cookies opcionais (pra driblar o "confirme que não é um robô" em IP de nuvem
@@ -317,7 +322,7 @@ async function downloadOne(it, root) {
   const sub = fs.mkdtempSync(path.join(root, "v-"));
   const outTpl = path.join(sub, "media.%(ext)s");
   const fmt = pickFormat(it.audio, it.height);
-  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(it.url, it.ig) };
+  const opts = { output: outTpl, format: fmt, formatSort: "vcodec:h264", noPart: true, ...commonOpts(it.url, it.ig) };
   if (!it.audio) opts.mergeOutputFormat = "mp4";
   await youtubedl(it.url, opts);
   const files = fs.readdirSync(sub);
@@ -394,7 +399,7 @@ app.get("/download", dlLimiter, async (req, res) => {
   const outTpl = path.join(tmp, "media.%(ext)s");
   const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} };
 
-  const opts = { output: outTpl, format: fmt, noPart: true, ...commonOpts(url, req.query.ig) };
+  const opts = { output: outTpl, format: fmt, formatSort: "vcodec:h264", noPart: true, ...commonOpts(url, req.query.ig) };
   if (!audio) opts.mergeOutputFormat = "mp4";
 
   try {
