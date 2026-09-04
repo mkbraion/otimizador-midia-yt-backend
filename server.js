@@ -216,7 +216,7 @@ async function apiDownload(res, url, audio, H, title) {
   res.on("close", () => { try { p.kill("SIGKILL"); } catch {} });
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null, igCookie: !!IG_COOKIE_PATH, cookie: !!COOKIE_PATH }));
+app.get("/health", (_req, res) => res.json({ ok: true, service: "oficina-midia-yt", api: USE_API, host: USE_API ? RAPID_HOST : null, igCookie: !!IG_COOKIE_PATH, cookie: !!COOKIE_PATH, galleryDl: fs.existsSync(process.env.GALLERYDL_PATH || "/usr/local/bin/gallery-dl") }));
 
 // ---- registra um cookie do Instagram enviado pelo site (POST, fica só em memória) ----
 // Body: { cookie: "<conteúdo do cookies.txt>" }  →  devolve { sid }
@@ -371,6 +371,65 @@ app.get("/zip", zipLimiter, async (req, res) => {
   }
   try { await archive.finalize(); } catch (e) {}
   try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+});
+
+// ---- baixar PERFIL do Instagram (fotos + vídeos + destaques) via gallery-dl ----
+const GALLERY_DL = process.env.GALLERYDL_PATH || "gallery-dl";
+const IGJOBS = new Map(); // token -> { url, mode, ig, ts }
+const IG_MAX_ITEMS = parseInt(process.env.IG_MAX_ITEMS) || 80;
+function igUserUrl(input) {
+  let u = String(input || "").trim();
+  const m = u.match(/instagram\.com\/([^/?#]+)/i);
+  let user = (m ? m[1] : u).replace(/^@/, "");
+  if (["p", "reel", "reels", "stories", "tv", "explore"].includes(user.toLowerCase())) return null;
+  if (!/^[A-Za-z0-9._]{1,60}$/.test(user)) return null;
+  return "https://www.instagram.com/" + user + "/";
+}
+// registra o pedido (precisa do cookie do IG)
+app.post("/ig-collect", infoLimiter, (req, res) => {
+  batchSweep();
+  const b = req.body || {};
+  const url = igUserUrl(b.user || b.url);
+  if (!url) return res.status(400).json({ error: "Informe o @ ou o link de um perfil do Instagram." });
+  const mode = ["posts", "highlights", "all"].includes(b.mode) ? b.mode : "all";
+  const ig = b.ig ? String(b.ig) : null;
+  if (!igFileFor(ig)) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (conta secundária). Configure em 'Cookie do Instagram'." });
+  const token = crypto.randomBytes(9).toString("hex");
+  IGJOBS.set(token, { url, mode, ig, ts: Date.now() });
+  res.json({ token, mode });
+});
+// baixa tudo com gallery-dl e envia um .zip
+app.get("/ig-zip", zipLimiter, async (req, res) => {
+  for (const [k, v] of IGJOBS) if (Date.now() - v.ts > BATCH_TTL) IGJOBS.delete(k);
+  const job = IGJOBS.get(req.query.token);
+  if (!job) return res.status(404).send("Pedido expirado — refaça no site.");
+  const cookie = igFileFor(job.ig);
+  if (!cookie) return res.status(400).send("Cookie do Instagram ausente ou expirado — salve o cookie de novo.");
+  const include = job.mode === "highlights" ? "highlights"
+    : job.mode === "posts" ? "posts,reels"
+    : "posts,reels,highlights";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-"));
+  const args = ["--cookies", cookie, "-q", "--no-part", "-D", dir,
+    "-o", "extractor.instagram.include=" + include,
+    "--range", "1-" + IG_MAX_ITEMS, job.url];
+  let err = "";
+  const p = spawn(GALLERY_DL, args);
+  p.stderr.on("data", d => { err += d.toString(); });
+  await new Promise(r => { p.on("close", r); p.on("error", () => r()); });
+  const files = [];
+  (function walk(d) { for (const f of fs.readdirSync(d)) { const fp = path.join(d, f); const st = fs.statSync(fp); st.isDirectory() ? walk(fp) : files.push(fp); } })(dir);
+  if (!files.length) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    return res.status(502).send("Nada baixado. O Instagram pode ter bloqueado (IP de nuvem) ou o cookie expirou/é inválido. Detalhe: " + err.slice(0, 400));
+  }
+  res.setHeader("Content-Disposition", 'attachment; filename="instagram.zip"');
+  res.setHeader("Content-Type", "application/zip");
+  const archive = archiver("zip", { zlib: { level: 0 } });
+  archive.on("error", () => { try { res.destroy(); } catch {} });
+  archive.pipe(res);
+  for (const fp of files) archive.append(fs.createReadStream(fp), { name: path.relative(dir, fp).replace(/\\/g, "/") });
+  try { await archive.finalize(); } catch (e) {}
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 });
 
 app.get("/download", dlLimiter, async (req, res) => {
