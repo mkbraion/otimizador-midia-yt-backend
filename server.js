@@ -385,52 +385,61 @@ function igUserUrl(input) {
   if (!/^[A-Za-z0-9._]{1,60}$/.test(user)) return null;
   return "https://www.instagram.com/" + user + "/";
 }
-// registra o pedido (precisa do cookie do IG)
+function igWalk(dir) { const files = []; try { (function w(d) { for (const f of fs.readdirSync(d)) { const fp = path.join(d, f); const st = fs.statSync(fp); st.isDirectory() ? w(fp) : files.push(fp); } })(dir); } catch {} return files; }
+function igCount(dir) { let n = 0, b = 0; for (const fp of igWalk(dir)) { n++; try { b += fs.statSync(fp).size; } catch {} } return { n, b }; }
+
+// registra o pedido e JÁ COMEÇA a baixar em background — o site acompanha por /ig-status
 app.post("/ig-collect", infoLimiter, (req, res) => {
-  batchSweep();
+  for (const [k, v] of IGJOBS) if (Date.now() - v.ts > BATCH_TTL) { try { v.proc && v.proc.kill(); } catch {} try { v.dir && fs.rmSync(v.dir, { recursive: true, force: true }); } catch {} IGJOBS.delete(k); }
   const b = req.body || {};
   const url = igUserUrl(b.user || b.url);
   if (!url) return res.status(400).json({ error: "Informe o @ ou o link de um perfil do Instagram." });
-  const mode = ["posts", "highlights", "all"].includes(b.mode) ? b.mode : "all";
+  const mode = ["posts", "highlights", "stories", "all"].includes(b.mode) ? b.mode : "all";
   const ig = b.ig ? String(b.ig) : null;
-  // aceita o cookie do navegador (sid) OU o cookie fixo do servidor (env YTDLP_IG_COOKIES_B64)
-  if (!igFileFor(ig) && !IG_COOKIE_PATH) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (conta secundária). Configure em 'Cookie do Instagram' ou no servidor." });
+  const cookie = igFileFor(ig) || IG_COOKIE_PATH;
+  if (!cookie) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (no site ou no servidor)." });
+  if ([...IGJOBS.values()].filter(j => !j.done).length >= 3) return res.status(429).json({ error: "Muitos downloads de perfil ao mesmo tempo. Espere um terminar." });
+  const include = mode === "highlights" ? "highlights" : mode === "posts" ? "posts,reels" : mode === "stories" ? "stories" : "posts,reels,highlights,stories";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-"));
+  // --no-part: só grava arquivo completo (evita corrompido). sleep/retries: driblam o rate-limit do IG.
+  const args = ["--cookies", cookie, "-q", "--no-part", "--no-mtime", "-R", "4", "--sleep-request", "1.0-2.5",
+    "-D", dir, "-o", "extractor.instagram.include=" + include, "--range", "1-" + IG_MAX_ITEMS, url];
   const token = crypto.randomBytes(9).toString("hex");
-  IGJOBS.set(token, { url, mode, ig, ts: Date.now() });
+  const job = { dir, mode, ts: Date.now(), done: false, error: null, err: "" };
+  const p = spawn(GALLERY_DL, args);
+  job.proc = p;
+  p.stderr.on("data", d => { job.err += d.toString(); });
+  p.on("close", () => { job.done = true; job.proc = null; });
+  p.on("error", e => { job.done = true; job.proc = null; job.error = String(e.message || e); });
+  IGJOBS.set(token, job);
   res.json({ token, mode });
 });
-// baixa tudo com gallery-dl e envia um .zip
+
+// progresso ao vivo do download do perfil
+app.get("/ig-status", (req, res) => {
+  const job = IGJOBS.get(req.query.token);
+  if (!job) return res.status(404).json({ error: "Pedido expirado — refaça no site." });
+  const { n, b } = igCount(job.dir);
+  let error = job.error;
+  if (job.done && n === 0 && !error) error = "Nada baixado. O Instagram pode ter bloqueado (IP de nuvem) ou o cookie expirou/é inválido. " + (job.err || "").slice(0, 300);
+  res.json({ done: job.done, count: n, bytes: b, error });
+});
+
+// envia o .zip do que já foi baixado (chamar quando /ig-status disser done)
 app.get("/ig-zip", zipLimiter, async (req, res) => {
-  for (const [k, v] of IGJOBS) if (Date.now() - v.ts > BATCH_TTL) IGJOBS.delete(k);
   const job = IGJOBS.get(req.query.token);
   if (!job) return res.status(404).send("Pedido expirado — refaça no site.");
-  const cookie = igFileFor(job.ig) || IG_COOKIE_PATH;
-  if (!cookie) return res.status(400).send("Cookie do Instagram ausente ou expirado — salve o cookie de novo.");
-  const include = job.mode === "highlights" ? "highlights"
-    : job.mode === "posts" ? "posts,reels"
-    : "posts,reels,highlights";
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-"));
-  const args = ["--cookies", cookie, "-q", "--no-part", "-D", dir,
-    "-o", "extractor.instagram.include=" + include,
-    "--range", "1-" + IG_MAX_ITEMS, job.url];
-  let err = "";
-  const p = spawn(GALLERY_DL, args);
-  p.stderr.on("data", d => { err += d.toString(); });
-  await new Promise(r => { p.on("close", r); p.on("error", () => r()); });
-  const files = [];
-  (function walk(d) { for (const f of fs.readdirSync(d)) { const fp = path.join(d, f); const st = fs.statSync(fp); st.isDirectory() ? walk(fp) : files.push(fp); } })(dir);
-  if (!files.length) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-    return res.status(502).send("Nada baixado. O Instagram pode ter bloqueado (IP de nuvem) ou o cookie expirou/é inválido. Detalhe: " + err.slice(0, 400));
-  }
+  const files = igWalk(job.dir);
+  if (!files.length) return res.status(502).send("Nada baixado. O Instagram bloqueou (IP de nuvem) ou o cookie expirou.");
   res.setHeader("Content-Disposition", 'attachment; filename="instagram.zip"');
   res.setHeader("Content-Type", "application/zip");
   const archive = archiver("zip", { zlib: { level: 0 } });
   archive.on("error", () => { try { res.destroy(); } catch {} });
   archive.pipe(res);
-  for (const fp of files) archive.append(fs.createReadStream(fp), { name: path.relative(dir, fp).replace(/\\/g, "/") });
+  for (const fp of files) archive.append(fs.createReadStream(fp), { name: path.relative(job.dir, fp).replace(/\\/g, "/") });
   try { await archive.finalize(); } catch (e) {}
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(job.dir, { recursive: true, force: true }); } catch {}
+  IGJOBS.delete(req.query.token);
 });
 
 app.get("/download", dlLimiter, async (req, res) => {
