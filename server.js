@@ -399,7 +399,13 @@ app.post("/ig-collect", infoLimiter, (req, res) => {
   const cookie = igFileFor(ig) || IG_COOKIE_PATH;
   if (!cookie) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (no site ou no servidor)." });
   if ([...IGJOBS.values()].filter(j => !j.done).length >= 3) return res.status(429).json({ error: "Muitos downloads de perfil ao mesmo tempo. Espere um terminar." });
-  const include = mode === "highlights" ? "highlights" : mode === "posts" ? "posts,reels" : mode === "stories" ? "stories" : "posts,reels,highlights,stories";
+  const KEYS = { posts: "posts,reels", highlights: "highlights", stories: "stories" };
+  let include;
+  if (Array.isArray(b.include) && b.include.some(k => KEYS[k])) {
+    include = [...new Set(b.include.filter(k => KEYS[k]).map(k => KEYS[k]).join(",").split(","))].join(",");
+  } else {
+    include = mode === "highlights" ? "highlights" : mode === "posts" ? "posts,reels" : mode === "stories" ? "stories" : "posts,reels,highlights,stories";
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-"));
   // --no-part: só grava arquivo completo (evita corrompido). sleep/retries: driblam o rate-limit do IG.
   const args = ["--cookies", cookie, "-q", "--no-part", "--no-mtime", "-R", "4", "--sleep-request", "1.0-2.5",
