@@ -435,6 +435,7 @@ app.get("/ig-status", (req, res) => {
 app.get("/ig-zip", zipLimiter, async (req, res) => {
   const job = IGJOBS.get(req.query.token);
   if (!job) return res.status(404).send("Pedido expirado — refaça no site.");
+  if (!job.done) return res.status(409).send("Ainda baixando — aguarde a barra de progresso terminar.");
   const files = igWalk(job.dir);
   if (!files.length) return res.status(502).send("Nada baixado. O Instagram bloqueou (IP de nuvem) ou o cookie expirou.");
   res.setHeader("Content-Disposition", 'attachment; filename="instagram.zip"');
