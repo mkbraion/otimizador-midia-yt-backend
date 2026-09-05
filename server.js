@@ -393,7 +393,8 @@ app.post("/ig-collect", infoLimiter, (req, res) => {
   if (!url) return res.status(400).json({ error: "Informe o @ ou o link de um perfil do Instagram." });
   const mode = ["posts", "highlights", "all"].includes(b.mode) ? b.mode : "all";
   const ig = b.ig ? String(b.ig) : null;
-  if (!igFileFor(ig)) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (conta secundária). Configure em 'Cookie do Instagram'." });
+  // aceita o cookie do navegador (sid) OU o cookie fixo do servidor (env YTDLP_IG_COOKIES_B64)
+  if (!igFileFor(ig) && !IG_COOKIE_PATH) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (conta secundária). Configure em 'Cookie do Instagram' ou no servidor." });
   const token = crypto.randomBytes(9).toString("hex");
   IGJOBS.set(token, { url, mode, ig, ts: Date.now() });
   res.json({ token, mode });
@@ -403,7 +404,7 @@ app.get("/ig-zip", zipLimiter, async (req, res) => {
   for (const [k, v] of IGJOBS) if (Date.now() - v.ts > BATCH_TTL) IGJOBS.delete(k);
   const job = IGJOBS.get(req.query.token);
   if (!job) return res.status(404).send("Pedido expirado — refaça no site.");
-  const cookie = igFileFor(job.ig);
+  const cookie = igFileFor(job.ig) || IG_COOKIE_PATH;
   if (!cookie) return res.status(400).send("Cookie do Instagram ausente ou expirado — salve o cookie de novo.");
   const include = job.mode === "highlights" ? "highlights"
     : job.mode === "posts" ? "posts,reels"
