@@ -385,6 +385,14 @@ function igUserUrl(input) {
   if (!/^[A-Za-z0-9._]{1,60}$/.test(user)) return null;
   return "https://www.instagram.com/" + user + "/";
 }
+// Aceita perfil (@user) OU link direto de destaque/story/post/reel.
+function igTarget(input) {
+  const u = String(input || "").trim();
+  const d = u.match(/instagram\.com\/(stories\/highlights\/\d+|stories\/[A-Za-z0-9._]+|p\/[A-Za-z0-9_-]+|reel\/[A-Za-z0-9_-]+|tv\/[A-Za-z0-9_-]+)/i);
+  if (d) return { type: "direct", url: "https://www.instagram.com/" + d[1].replace(/\/+$/, "") + "/" };
+  const p = igUserUrl(u);
+  return p ? { type: "profile", url: p } : null;
+}
 function igWalk(dir) { const files = []; try { (function w(d) { for (const f of fs.readdirSync(d)) { const fp = path.join(d, f); const st = fs.statSync(fp); st.isDirectory() ? w(fp) : files.push(fp); } })(dir); } catch {} return files; }
 function igCount(dir) { let n = 0, b = 0; for (const fp of igWalk(dir)) { n++; try { b += fs.statSync(fp).size; } catch {} } return { n, b }; }
 
@@ -392,13 +400,13 @@ function igCount(dir) { let n = 0, b = 0; for (const fp of igWalk(dir)) { n++; t
 app.post("/ig-collect", infoLimiter, (req, res) => {
   for (const [k, v] of IGJOBS) if (Date.now() - v.ts > BATCH_TTL) { try { v.proc && v.proc.kill(); } catch {} try { v.dir && fs.rmSync(v.dir, { recursive: true, force: true }); } catch {} IGJOBS.delete(k); }
   const b = req.body || {};
-  const url = igUserUrl(b.user || b.url);
-  if (!url) return res.status(400).json({ error: "Informe o @ ou o link de um perfil do Instagram." });
+  const target = igTarget(b.user || b.url);
+  if (!target) return res.status(400).json({ error: "Informe o @/link de um perfil, ou o link de um destaque/story/post do Instagram." });
   const mode = ["posts", "highlights", "stories", "all"].includes(b.mode) ? b.mode : "all";
   const ig = b.ig ? String(b.ig) : null;
   const cookie = igFileFor(ig) || IG_COOKIE_PATH;
-  if (!cookie) return res.status(400).json({ error: "Baixar um perfil exige o cookie do Instagram (no site ou no servidor)." });
-  if ([...IGJOBS.values()].filter(j => !j.done).length >= 3) return res.status(429).json({ error: "Muitos downloads de perfil ao mesmo tempo. Espere um terminar." });
+  if (!cookie) return res.status(400).json({ error: "Baixar do Instagram exige o cookie (no site ou no servidor)." });
+  if ([...IGJOBS.values()].filter(j => !j.done).length >= 3) return res.status(429).json({ error: "Muitos downloads ao mesmo tempo. Espere um terminar." });
   const KEYS = { posts: "posts,reels", highlights: "highlights", stories: "stories" };
   let include;
   if (Array.isArray(b.include) && b.include.some(k => KEYS[k])) {
@@ -409,7 +417,10 @@ app.post("/ig-collect", infoLimiter, (req, res) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-"));
   // --no-part: só grava arquivo completo (evita corrompido). sleep/retries: driblam o rate-limit do IG.
   const args = ["--cookies", cookie, "-q", "--no-part", "--no-mtime", "-R", "4", "--sleep-request", "1.0-2.5",
-    "-D", dir, "-o", "extractor.instagram.include=" + include, "--range", "1-" + IG_MAX_ITEMS, url];
+    "-D", dir, "--range", "1-" + IG_MAX_ITEMS];
+  // filtro de categorias só faz sentido pra PERFIL; link direto (destaque/story/post) baixa o item inteiro
+  if (target.type === "profile") args.push("-o", "extractor.instagram.include=" + include);
+  args.push(target.url);
   const token = crypto.randomBytes(9).toString("hex");
   const job = { dir, mode, ts: Date.now(), done: false, error: null, err: "" };
   const p = spawn(GALLERY_DL, args);
