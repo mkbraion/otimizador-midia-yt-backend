@@ -1,3 +1,19 @@
+<!-- MKBRAION-POLISH:START -->
+<div align="center">
+
+# Otimizador Midia YT Backend
+
+**Backend Node.js e Express para consulta e download de mídia com yt-dlp, incluindo CORS, rate limiting e processamento de arquivos.**
+
+[![Repositório](https://img.shields.io/badge/GitHub-Repositório-181717?logo=github)](https://github.com/mkbraion/otimizador-midia-yt-backend)
+
+</div>
+
+**Stack / tópicos:** ``api`` · ``backend`` · ``cors`` · ``docker`` · ``express`` · ``ffmpeg`` · ``javascript`` · ``media-downloader`` · ``nodejs`` · ``rate-limiting`` · ``vercel`` · ``video-download``
+
+> Projeto mantido por [@mkbraion](https://github.com/mkbraion).
+<!-- MKBRAION-POLISH:END -->
+
 # Oficina de Mídia — Backend de download do YouTube
 
 Servidor Node que a [Oficina de Mídia](https://otimizador-midia.vercel.app) usa para baixar
